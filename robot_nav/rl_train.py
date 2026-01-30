@@ -15,14 +15,14 @@ def main(args=None):
         "cuda" if torch.cuda.is_available() else "cpu"
     )  # using cuda if it is available, cpu otherwise
     nr_eval_episodes = 10  # how many episodes to use to run evaluation
-    max_epochs = 60  # max number of epochs
+    max_epochs = 30  # max number of epochs
     epoch = 0  # starting epoch number
-    episodes_per_epoch = 70  # how many episodes to run in single epoch
+    episodes_per_epoch = 50  # how many episodes to run in single epoch
     episode = 0  # starting episode number
     train_every_n = 2  # train and update network parameters every n episodes
-    training_iterations = 80  # how many batches to use for single training cycle
+    training_iterations = 50  # how many batches to use for single training cycle
     batch_size = 64  # batch size for each training iteration
-    max_steps = 300  # maximum number of steps in single episode
+    max_steps = 200  # maximum number of steps in single episode
     steps = 0  # starting step number
     load_saved_buffer = False  # whether to load experiences from assets/data.yml
     pretrain = False  # whether to use the loaded experiences to pre-train the model (load_saved_buffer must be True)
@@ -42,7 +42,7 @@ def main(args=None):
     )  # instantiate a model
 
     sim = SIM(
-        world_file="worlds/robot_world.yaml", disable_plotting=False
+        world_file="worlds/robot_world.yaml", disable_plotting=True
     )  # instantiate environment
     replay_buffer = get_buffer(
         model,

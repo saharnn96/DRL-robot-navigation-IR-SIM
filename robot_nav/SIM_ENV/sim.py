@@ -88,8 +88,10 @@ class SIM(SIM_ENV):
         if robot_state is None:
             robot_state = [[random.uniform(1, 9)], [random.uniform(1, 9)], [0]]
 
+        # Only use first 3 elements (x, y, theta) - irsim expects shape (3, 1)
+        robot_state_3 = robot_state[:3] if len(robot_state) > 3 else robot_state
         self.env.robot.set_state(
-            state=np.array(robot_state),
+            state=np.array(robot_state_3),
             init=True,
         )
 
