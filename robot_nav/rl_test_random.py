@@ -30,7 +30,7 @@ def main(args=None):
     )  # instantiate a model
 
     sim = SIM(
-        world_file="worlds/eval_world.yaml", disable_plotting=True
+        world_file="worlds/eval_world.yaml", disable_plotting=False
     )  # instantiate environment
     print("..............................................")
     print(f"Testing {test_scenarios} scenarios")
