@@ -29,6 +29,7 @@ class SIM(SIM_ENV):
         self.env = irsim.make(
             world_file, disable_all_plot=disable_plotting, display=display
         )
+        self.disable_plotting = disable_plotting
         robot_info = self.env.get_robot_info(0)
         self.robot_goal = robot_info.goal
 
@@ -45,7 +46,10 @@ class SIM(SIM_ENV):
                    collision flag, goal reached flag, applied action, and computed reward.
         """
         self.env.step(action_id=0, action=np.array([[lin_velocity], [ang_velocity]]))
-        self.env.render()
+        
+        # Skip render for maximum speed during training
+        if not self.disable_plotting:
+            self.env.render()
 
         scan = self.env.get_lidar_scan()
         latest_scan = scan["ranges"]

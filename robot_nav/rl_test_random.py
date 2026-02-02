@@ -1,4 +1,4 @@
-from robot_nav.models.SAC.SAC import SAC
+from robot_nav.models.CNNTD3.CNNTD3 import CNNTD3
 import statistics
 import numpy as np
 import tqdm
@@ -12,27 +12,26 @@ def main(args=None):
     """Main testing function"""
     action_dim = 2  # number of actions produced by the model
     max_action = 1  # maximum absolute value of output actions
-    state_dim = 25  # number of input values in the neural network (vector length of state input)
+    state_dim = 185  # number of input values in the neural network (vector length of state input)
     device = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
     )  # using cuda if it is available, cpu otherwise
     epoch = 0  # epoch number
     max_steps = 300  # maximum number of steps in single episode
-    test_scenarios = 1000
+    test_scenarios = 50
 
-    model = SAC(
+    model = CNNTD3(
         state_dim=state_dim,
         action_dim=action_dim,
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="SAC",
+        model_name="CNNTD3",
     )  # instantiate a model
 
     sim = SIM(
-        world_file="worlds/eval_world.yaml", disable_plotting=False
+        world_file="worlds/eval_world.yaml", disable_plotting=True
     )  # instantiate environment
-
     print("..............................................")
     print(f"Testing {test_scenarios} scenarios")
     total_reward = []
@@ -94,8 +93,10 @@ def main(args=None):
     avg_goal = goals / test_scenarios
     avg_inter_step_rew = statistics.mean(inter_rew)
     avg_inter_step_rew_std = statistics.stdev(inter_rew)
-    avg_steps_to_goal = statistics.mean(steps_to_goal)
-    avg_steps_to_goal_std = statistics.stdev(steps_to_goal)
+    # Convert numpy.int64 to Python int for statistics module
+    steps_to_goal = [int(x) for x in steps_to_goal]
+    avg_steps_to_goal = statistics.mean(steps_to_goal) if steps_to_goal else 0
+    avg_steps_to_goal_std = statistics.stdev(steps_to_goal) if len(steps_to_goal) > 1 else 0
     mean_lin_action = statistics.mean(lin_actions)
     lin_actions_std = statistics.stdev(lin_actions)
     mean_ang_action = statistics.mean(ang_actions)

@@ -29,7 +29,7 @@ def main(args=None):
     pretraining_iterations = (
         10  # number of training iterations to run during pre-training
     )
-    save_every = 5  # save the model every n training cycles
+    save_every = 50  # save the model every n training cycles
 
     model = CNNTD3(
         state_dim=state_dim,
@@ -37,7 +37,7 @@ def main(args=None):
         max_action=max_action,
         device=device,
         save_every=save_every,
-        load_model=False,
+        load_model=True,
         model_name="CNNTD3",
     )  # instantiate a model
 
