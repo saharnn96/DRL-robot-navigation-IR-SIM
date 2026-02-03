@@ -13,6 +13,8 @@ import time
 import yaml
 import os
 import tempfile
+import copy
+from queue import Queue
 
 # Matplotlib embedding in Tkinter
 import matplotlib
@@ -24,6 +26,7 @@ import matplotlib.pyplot as plt
 import torch
 from robot_nav.SIM_ENV.sim import SIM
 from robot_nav.models.CNNTD3.CNNTD3 import CNNTD3
+from robot_nav.replay_buffer import ReplayBuffer
 
 
 class SimulationGUI:
@@ -55,8 +58,25 @@ class SimulationGUI:
             'simulation_delay': tk.DoubleVar(value=0.05),  # seconds between steps
         }
         
-        # Temp world file path
+        # Temp world file paths (separate for main and twin)
         self.temp_world_file = None
+        self.twin_world_file = None
+        
+        # Twin training system (completely separate from main simulation)
+        self.twin_model = None
+        self.twin_running = False
+        self.twin_thread = None
+        self.twin_stats = {
+            'status': 'Stopped',
+            'epoch': 0,
+            'episode': 0,
+            'total_steps': 0,
+            'goals': 0,
+            'collisions': 0,
+            'avg_reward': 0.0,
+            'goal_rate': 0.0,
+            'collision_rate': 0.0,
+        }
         
         # Statistics
         self.stats = {
@@ -214,46 +234,46 @@ class SimulationGUI:
         
         ttk.Separator(control_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky='ew', pady=10)
         row += 1
-        row += 1
         
-        # Model selection
-        ttk.Label(control_frame, text="Model:").grid(row=row, column=0, sticky='w')
-        model_combo = ttk.Combobox(control_frame, textvariable=self.params['model_name'], width=15)
-        model_combo['values'] = ('CNNTD3', 'TD3', 'SAC', 'DDPG', 'PPO')
-        model_combo.grid(row=row, column=1, sticky='w')
+        # Apply World Settings button
+        ttk.Button(control_frame, text="Apply World Settings", command=self._apply_world_settings).grid(
+            row=row, column=0, columnspan=2, pady=5)
         row += 1
         
         ttk.Separator(control_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky='ew', pady=10)
         row += 1
         
-        # === Display Options ===
-        ttk.Label(control_frame, text="─── Display Options ───", 
+        # === Twin Training ===
+        ttk.Label(control_frame, text="─── Twin Training ───", 
                   font=('Helvetica', 10, 'bold')).grid(row=row, column=0, columnspan=2, pady=10)
         row += 1
         
-        ttk.Checkbutton(control_frame, text="Show LIDAR", 
-                        variable=self.params['show_lidar']).grid(row=row, column=0, columnspan=2, sticky='w')
+        # Twin control buttons
+        twin_btn_frame = ttk.Frame(control_frame)
+        twin_btn_frame.grid(row=row, column=0, columnspan=2, pady=5)
+        
+        self.start_twin_btn = ttk.Button(twin_btn_frame, text="▶ Start Training", 
+                                          command=self._start_twin, width=12)
+        self.start_twin_btn.grid(row=0, column=0, padx=2)
+        
+        self.stop_twin_btn = ttk.Button(twin_btn_frame, text="⏹ Stop Training", 
+                                         command=self._stop_twin, width=12, state='disabled')
+        self.stop_twin_btn.grid(row=0, column=1, padx=2)
         row += 1
         
-        ttk.Checkbutton(control_frame, text="Show Trajectory", 
-                        variable=self.params['show_trajectory']).grid(row=row, column=0, columnspan=2, sticky='w')
+        # Swap model button
+        self.swap_btn = ttk.Button(control_frame, text="🔄 Swap Twin → Main Model", 
+                                   command=self._swap_twin_model, state='disabled')
+        self.swap_btn.grid(row=row, column=0, columnspan=2, pady=5)
         row += 1
         
-        ttk.Separator(control_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky='ew', pady=10)
-        row += 1
-        
-        # === Statistics ===
-        ttk.Label(control_frame, text="─── Statistics ───", 
-                  font=('Helvetica', 10, 'bold')).grid(row=row, column=0, columnspan=2, pady=10)
-        row += 1
-        
-        # Stats labels
-        self.stats_labels = {}
-        for stat_name in ['Episode', 'Step', 'Total Reward', 'Distance to Goal', 'Collisions', 'Goals Reached']:
-            ttk.Label(control_frame, text=f"{stat_name}:").grid(row=row, column=0, sticky='w')
-            label = ttk.Label(control_frame, text="0")
+        # Twin stats (simplified)
+        self.twin_stats_labels = {}
+        for stat_name in ['Status', 'Epoch', 'Goal Rate']:
+            ttk.Label(control_frame, text=f"Twin {stat_name}:").grid(row=row, column=0, sticky='w')
+            label = ttk.Label(control_frame, text="Stopped" if stat_name == 'Status' else "0", foreground='blue')
             label.grid(row=row, column=1, sticky='w')
-            self.stats_labels[stat_name] = label
+            self.twin_stats_labels[stat_name] = label
             row += 1
         
         ttk.Separator(control_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky='ew', pady=10)
@@ -262,11 +282,6 @@ class SimulationGUI:
         # Status
         self.status_label = ttk.Label(control_frame, text="Status: Ready", foreground='green')
         self.status_label.grid(row=row, column=0, columnspan=2, pady=10)
-        
-        # Apply button
-        row += 1
-        ttk.Button(control_frame, text="Apply & Reload", command=self._apply_and_reload).grid(
-            row=row, column=0, columnspan=2, pady=10)
         
         # Initialize world controls visibility
         self._update_world_controls()
@@ -303,8 +318,12 @@ class SimulationGUI:
         except Exception as e:
             self.status_label.config(text=f"Status: Model error - {str(e)[:30]}", foreground='red')
             
-    def _create_custom_world_file(self):
-        """Create a temporary world file with custom obstacle settings."""
+    def _create_custom_world_file(self, for_twin=False):
+        """Create a temporary world file with custom obstacle settings.
+        
+        Args:
+            for_twin: If True, creates a separate world file for the twin simulation
+        """
         # Use the robot_world.yaml as base template
         # Get the directory where this script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -387,14 +406,18 @@ class SimulationGUI:
         # Update config
         world_config['obstacle'] = new_obstacles
         
-        # Create temp file
+        # Create temp file (separate files for main and twin)
         temp_dir = tempfile.gettempdir()
-        self.temp_world_file = os.path.join(temp_dir, 'custom_robot_world.yaml')
-        
-        with open(self.temp_world_file, 'w') as f:
-            yaml.dump(world_config, f, default_flow_style=False)
-        
-        return self.temp_world_file
+        if for_twin:
+            self.twin_world_file = os.path.join(temp_dir, 'twin_robot_world.yaml')
+            with open(self.twin_world_file, 'w') as f:
+                yaml.dump(world_config, f, default_flow_style=False)
+            return self.twin_world_file
+        else:
+            self.temp_world_file = os.path.join(temp_dir, 'custom_robot_world.yaml')
+            with open(self.temp_world_file, 'w') as f:
+                yaml.dump(world_config, f, default_flow_style=False)
+            return self.temp_world_file
             
     def _initialize_simulation(self):
         """Initialize the simulation environment."""
@@ -448,11 +471,17 @@ class SimulationGUI:
             self.status_label.config(text="Status: Running", foreground='green')
             
     def _stop_simulation(self):
-        """Stop the simulation."""
+        """Stop the simulation and reset the world."""
         self.running = False
         self.start_btn.config(state='normal')
         self.pause_btn.config(state='disabled')
         self.stop_btn.config(state='disabled')
+        
+        # Reset the world environment
+        if self.sim is not None:
+            self.sim.reset()
+            self.root.after(0, self._update_visualization)
+        
         self.status_label.config(text="Status: Stopped", foreground='red')
         
     def _reset_simulation(self):
@@ -486,6 +515,11 @@ class SimulationGUI:
         
     def _simulation_loop(self):
         """Main simulation loop running in a thread."""
+        # Hardcoded parameters
+        scale = 0.25
+        max_steps = 300
+        sim_delay = 0.05
+        
         # Reset environment
         latest_scan, distance, cos, sin, collision, goal, a, reward = self.sim.reset()
         self.episode_count += 1
@@ -502,7 +536,6 @@ class SimulationGUI:
             action = self.model.get_action(np.array(state), False)
             
             # Apply velocity scaling
-            scale = self.params['linear_vel_scale'].get()
             a_in = [(action[0] + 1) * scale, action[1]]
             
             # Step simulation
@@ -525,13 +558,13 @@ class SimulationGUI:
             self.root.after(0, self._update_visualization)
             
             # Check for episode end
-            if collision or goal or self.step_count >= self.params['max_steps'].get():
+            if collision or goal or self.step_count >= max_steps:
                 self.episode_count += 1
                 self.step_count = 0
                 latest_scan, distance, cos, sin, collision, goal, a, reward = self.sim.reset()
                 
             # Delay for visualization
-            time.sleep(self.params['simulation_delay'].get())
+            time.sleep(sim_delay)
             
     def _execute_step(self):
         """Execute a single step."""
@@ -651,25 +684,309 @@ class SimulationGUI:
                 self.ax.plot([robot_x, end_x], [robot_y, end_y], 'r-', alpha=0.2, linewidth=0.5)
         
         self.canvas.draw()
-        
+    
     def _update_stats_display(self):
-        """Update the statistics display."""
-        self.stats_labels['Episode'].config(text=str(self.episode_count))
-        self.stats_labels['Step'].config(text=str(self.step_count))
-        self.stats_labels['Total Reward'].config(text=f"{self.stats['total_reward']:.2f}")
-        self.stats_labels['Distance to Goal'].config(text=f"{self.stats['current_distance']:.2f}")
-        self.stats_labels['Collisions'].config(text=str(self.stats['collisions']))
-        self.stats_labels['Goals Reached'].config(text=str(self.stats['goals']))
-        
+        """Update the statistics display (now just updates title)."""
+        # Stats are now shown in the visualization title
+        pass
+    
+    def _apply_world_settings(self):
+        """Apply world settings and reload simulation."""
+        self._stop_simulation()
+        self.sim = None
+        if self._initialize_simulation():
+            self.sim.reset()
+            self._update_visualization()
+            self.status_label.config(text="Status: World settings applied", foreground='green')
+    
     def _apply_and_reload(self):
         """Apply new parameters and reload simulation."""
         self._stop_simulation()
+        self._stop_twin()
         self.sim = None
         self._initialize_model()
         if self._initialize_simulation():
             self.sim.reset()
             self._update_visualization()
             messagebox.showinfo("Success", "Settings applied and simulation reloaded!")
+    
+    def _start_twin(self):
+        """Start the twin training in a completely separate thread."""
+        if self.model is None:
+            messagebox.showerror("Error", "Please load a model first!")
+            return
+            
+        self.status_label.config(text="Status: Starting twin training...", foreground='orange')
+        self.root.update()
+        
+        # Reset twin stats
+        self.twin_stats = {
+            'status': 'Starting',
+            'epoch': 0,
+            'episode': 0,
+            'total_steps': 0,
+            'goals': 0,
+            'collisions': 0,
+            'avg_reward': 0.0,
+            'goal_rate': 0.0,
+            'collision_rate': 0.0,
+        }
+        
+        # Create separate world file for twin (won't affect main simulation)
+        twin_world_file = self._create_custom_world_file(for_twin=True)
+        if twin_world_file is None:
+            messagebox.showerror("Error", "Failed to create world file for twin!")
+            return
+        
+        # Copy main model weights to pass to the training thread
+        try:
+            main_actor_state = copy.deepcopy(self.model.actor.state_dict())
+            main_critic_state = copy.deepcopy(self.model.critic.state_dict())
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to copy model weights: {e}")
+            return
+        
+        # Start twin training thread
+        self.twin_running = True
+        self.twin_thread = threading.Thread(
+            target=self._twin_training_loop,
+            args=(twin_world_file, main_actor_state, main_critic_state),
+            daemon=True
+        )
+        self.twin_thread.start()
+        
+        # Update UI
+        self.start_twin_btn.config(state='disabled')
+        self.stop_twin_btn.config(state='normal')
+        self.swap_btn.config(state='normal')
+        self.status_label.config(text="Status: Twin training", foreground='green')
+        
+        # Start stats update timer
+        self._update_twin_stats()
+    
+    def _twin_training_loop(self, world_file, actor_state_dict, critic_state_dict):
+        """Complete training loop for the twin - runs entirely in its own thread."""
+        # ===== Hardcoded training hyperparameters =====
+        state_dim = 185
+        action_dim = 2
+        max_action = 1
+        max_epochs = 30
+        episodes_per_epoch = 50
+        train_every_n = 2
+        training_iterations = 50
+        batch_size = 64
+        max_steps = 200
+        scale = 0.25
+        nr_eval_episodes = 10
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        try:
+            # ===== Create twin's own simulation (completely separate) =====
+            twin_sim = SIM(world_file=world_file, disable_plotting=True)
+            
+            # ===== Create twin's own model =====
+            self.twin_model = CNNTD3(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                max_action=max_action,
+                device=device,
+                load_model=False,
+                model_name="twin_training",
+            )
+            # Initialize with main model's weights
+            self.twin_model.actor.load_state_dict(actor_state_dict)
+            self.twin_model.critic.load_state_dict(critic_state_dict)
+            
+            # ===== Create twin's own replay buffer =====
+            replay_buffer = ReplayBuffer(buffer_size=50000, random_seed=42)
+            
+            self.twin_stats['status'] = 'Training'
+            
+        except Exception as e:
+            print(f"Twin initialization error: {e}")
+            self.twin_stats['status'] = f'Error: {str(e)[:20]}'
+            self.twin_running = False
+            return
+        
+        # ===== Training loop =====
+        epoch = 0
+        episode = 0
+        steps = 0
+        
+        try:
+            # Initial step
+            latest_scan, distance, cos, sin, collision, goal, a, reward = twin_sim.step(
+                lin_velocity=0.0, ang_velocity=0.0
+            )
+            
+            while self.twin_running and epoch < max_epochs:
+                # Prepare state
+                state, terminal = self.twin_model.prepare_state(
+                    latest_scan, distance, cos, sin, collision, goal, a
+                )
+                
+                # Get action (with exploration)
+                action = self.twin_model.get_action(np.array(state), True)
+                a_in = [(action[0] + 1) * scale, action[1]]
+                
+                # Step environment
+                latest_scan, distance, cos, sin, collision, goal, a, reward = twin_sim.step(
+                    lin_velocity=a_in[0], ang_velocity=a_in[1]
+                )
+                
+                # Prepare next state
+                next_state, terminal = self.twin_model.prepare_state(
+                    latest_scan, distance, cos, sin, collision, goal, a
+                )
+                
+                # Add to replay buffer
+                replay_buffer.add(state, action, reward, terminal, next_state)
+                
+                # Update stats
+                steps += 1
+                self.twin_stats['total_steps'] = steps
+                
+                if collision:
+                    self.twin_stats['collisions'] += 1
+                if goal:
+                    self.twin_stats['goals'] += 1
+                
+                # Episode end
+                if terminal or steps >= max_steps:
+                    latest_scan, distance, cos, sin, collision, goal, a, reward = twin_sim.reset()
+                    episode += 1
+                    self.twin_stats['episode'] = episode
+                    steps = 0
+                    
+                    # Train periodically
+                    if episode % train_every_n == 0 and replay_buffer.size() >= batch_size:
+                        self.twin_model.train(
+                            replay_buffer=replay_buffer,
+                            iterations=training_iterations,
+                            batch_size=batch_size,
+                        )
+                
+                # Epoch end - run evaluation
+                if episode >= episodes_per_epoch:
+                    episode = 0
+                    epoch += 1
+                    self.twin_stats['epoch'] = epoch
+                    self.twin_stats['status'] = f'Evaluating epoch {epoch}'
+                    
+                    # Run evaluation
+                    avg_reward, goal_rate, collision_rate = self._twin_evaluate(
+                        twin_sim, nr_eval_episodes, max_steps, scale
+                    )
+                    
+                    self.twin_stats['avg_reward'] = avg_reward
+                    self.twin_stats['goal_rate'] = goal_rate
+                    self.twin_stats['collision_rate'] = collision_rate
+                    self.twin_stats['status'] = 'Training'
+                    
+                    # Reset for next epoch
+                    latest_scan, distance, cos, sin, collision, goal, a, reward = twin_sim.reset()
+                    
+        except Exception as e:
+            print(f"Twin training error: {e}")
+            self.twin_stats['status'] = f'Error: {str(e)[:20]}'
+        
+        self.twin_stats['status'] = 'Completed' if epoch >= max_epochs else 'Stopped'
+        self.twin_running = False
+    
+    def _twin_evaluate(self, twin_sim, eval_episodes, max_steps, scale):
+        """Run evaluation episodes for the twin model."""
+        total_reward = 0.0
+        goals = 0
+        collisions = 0
+        
+        for _ in range(eval_episodes):
+            if not self.twin_running:
+                break
+                
+            latest_scan, distance, cos, sin, collision, goal, a, reward = twin_sim.reset()
+            done = False
+            step_count = 0
+            
+            while not done and step_count < max_steps and self.twin_running:
+                state, _ = self.twin_model.prepare_state(
+                    latest_scan, distance, cos, sin, collision, goal, a
+                )
+                action = self.twin_model.get_action(np.array(state), False)  # No exploration
+                a_in = [(action[0] + 1) * scale, action[1]]
+                
+                latest_scan, distance, cos, sin, collision, goal, a, reward = twin_sim.step(
+                    lin_velocity=a_in[0], ang_velocity=a_in[1]
+                )
+                
+                total_reward += reward
+                step_count += 1
+                
+                if collision:
+                    collisions += 1
+                    done = True
+                if goal:
+                    goals += 1
+                    done = True
+        
+        avg_reward = total_reward / max(eval_episodes, 1)
+        goal_rate = goals / max(eval_episodes, 1)
+        collision_rate = collisions / max(eval_episodes, 1)
+        
+        return avg_reward, goal_rate, collision_rate
+    
+    def _stop_twin(self):
+        """Stop the twin training."""
+        self.twin_running = False
+        self.twin_stats['status'] = 'Stopping...'
+        
+        # Wait for thread to finish
+        if self.twin_thread is not None:
+            self.twin_thread.join(timeout=2.0)
+        
+        self.twin_thread = None
+        self.twin_stats['status'] = 'Stopped'
+        
+        # Update UI
+        self.start_twin_btn.config(state='normal')
+        self.stop_twin_btn.config(state='disabled')
+        # Keep swap button enabled if twin model exists
+        if self.twin_model is None:
+            self.swap_btn.config(state='disabled')
+        self._update_twin_stats_display()
+        self.status_label.config(text="Status: Twin stopped", foreground='orange')
+    
+    def _swap_twin_model(self):
+        """Swap the twin model with the main model."""
+        if self.twin_model is None:
+            messagebox.showerror("Error", "No twin model available!")
+            return
+        
+        # Swap weights between main and twin
+        old_actor_state = copy.deepcopy(self.model.actor.state_dict())
+        old_critic_state = copy.deepcopy(self.model.critic.state_dict())
+        
+        self.model.actor.load_state_dict(self.twin_model.actor.state_dict())
+        self.model.critic.load_state_dict(self.twin_model.critic.state_dict())
+        
+        # Update twin with old main model weights
+        self.twin_model.actor.load_state_dict(old_actor_state)
+        self.twin_model.critic.load_state_dict(old_critic_state)
+        
+        messagebox.showinfo("Success", "Swapped twin model with main model!")
+        self.status_label.config(text="Status: Models swapped!", foreground='green')
+    
+    def _update_twin_stats(self):
+        """Periodically update twin statistics display."""
+        if self.twin_running:
+            self._update_twin_stats_display()
+            self.root.after(500, self._update_twin_stats)  # Update every 500ms
+    
+    def _update_twin_stats_display(self):
+        """Update the twin stats labels."""
+        self.twin_stats_labels['Status'].config(text=str(self.twin_stats.get('status', 'Stopped')))
+        self.twin_stats_labels['Epoch'].config(text=str(self.twin_stats.get('epoch', 0)))
+        self.twin_stats_labels['Goal Rate'].config(text=f"{self.twin_stats.get('goal_rate', 0.0):.2%}")
 
 
 def main():

@@ -29,7 +29,7 @@ def main(args=None):
     pretraining_iterations = (
         10  # number of training iterations to run during pre-training
     )
-    save_every = 50  # save the model every n training cycles
+    save_every = 0  # save the model every n training cycles
 
     model = CNNTD3(
         state_dim=state_dim,
@@ -58,6 +58,9 @@ def main(args=None):
         lin_velocity=0.0, ang_velocity=0.0
     )  # get the initial step state
 
+    print(f"Starting training: {max_epochs} epochs, {episodes_per_epoch} episodes/epoch")
+    print(f"Training on device: {device}")
+
     while epoch < max_epochs:  # train until max_epochs is reached
         state, terminal = model.prepare_state(
             latest_scan, distance, cos, sin, collision, goal, a
@@ -84,6 +87,11 @@ def main(args=None):
         ):  # reset environment of terminal stat ereached, or max_steps were taken
             latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
             episode += 1
+            
+            # Print progress every 10 episodes
+            if episode % 10 == 0:
+                print(f"Epoch {epoch+1}/{max_epochs} | Episode {episode}/{episodes_per_epoch}")
+            
             if episode % train_every_n == 0:
                 model.train(
                     replay_buffer=replay_buffer,
