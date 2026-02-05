@@ -261,6 +261,27 @@ class CNNTD3(object):
         else:
             return self.act(obs)
 
+    def get_action_batch(self, obs_batch, add_noise):
+        """
+        Selects actions for a batch of observations in a single forward pass.
+
+        Args:
+            obs_batch (np.ndarray): Batch of observations, shape (batch_size, state_dim).
+            add_noise (bool): Whether to add exploration noise to the actions.
+
+        Returns:
+            (np.ndarray): Batch of actions, shape (batch_size, action_dim).
+        """
+        with torch.no_grad():
+            states = torch.FloatTensor(obs_batch).to(self.device)
+            actions = self.actor(states).cpu().numpy()
+        
+        if add_noise:
+            noise = np.random.normal(0, 0.2, size=actions.shape)
+            actions = (actions + noise).clip(-self.max_action, self.max_action)
+        
+        return actions
+
     def act(self, state):
         """
         Computes the deterministic action from the actor network for a given state.
@@ -444,18 +465,18 @@ class CNNTD3(object):
             directory (Path): Path to load the model files from.
         """
         self.actor.load_state_dict(
-            torch.load("%s/%s_actor.pth" % (directory, filename))
+            torch.load("%s/%s_actor.pth" % (directory, filename), weights_only=True)
         )
         self.actor_target.load_state_dict(
-            torch.load("%s/%s_actor_target.pth" % (directory, filename))
+            torch.load("%s/%s_actor_target.pth" % (directory, filename), weights_only=True)
         )
         self.critic.load_state_dict(
-            torch.load("%s/%s_critic.pth" % (directory, filename))
+            torch.load("%s/%s_critic.pth" % (directory, filename), weights_only=True)
         )
         self.critic_target.load_state_dict(
-            torch.load("%s/%s_critic_target.pth" % (directory, filename))
+            torch.load("%s/%s_critic_target.pth" % (directory, filename), weights_only=True)
         )
-        print(f"Loaded weights from: {directory}")
+        print(f"Loaded weights from: {directory}/{filename}")
 
     def prepare_state(self, latest_scan, distance, cos, sin, collision, goal, action):
         """

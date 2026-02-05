@@ -26,7 +26,7 @@ def main(args=None):
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="CNNTD3",
+        model_name="CNNTD3_debug_test4",
     )  # instantiate a model
 
     sim = SIM(

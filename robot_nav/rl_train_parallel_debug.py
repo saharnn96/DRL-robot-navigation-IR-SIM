@@ -1,9 +1,12 @@
 """
-Parallelized RL Training Script with Async Training
+Debug version of Parallel RL Training
 
-Uses multiple simulation environments running in parallel processes
-to collect experience faster, utilizing all CPU cores.
-Training runs in a separate thread to avoid blocking collection.
+This script allows testing each optimization separately to find the issue:
+- ENABLE_PARALLEL: Use multiple simulation environments
+- ENABLE_BATCH_INFERENCE: Use get_action_batch() vs individual get_action()
+- ENABLE_ASYNC_TRAINING: Train in background thread vs blocking
+
+Set these flags to True/False to isolate the problem.
 """
 
 from robot_nav.models.CNNTD3.CNNTD3 import CNNTD3
@@ -16,23 +19,24 @@ import time
 import threading
 from queue import Queue as ThreadQueue
 
+# ============= DEBUG FLAGS =============
+ENABLE_PARALLEL = True        # Use multiple environments (vs single)
+ENABLE_BATCH_INFERENCE = False # Use batch inference (vs loop)
+ENABLE_ASYNC_TRAINING = True  # Use async training (vs blocking)
+NUM_ENVS = 8                   # Number of parallel envs (if enabled)
+# =======================================
+
 
 def worker_collect_experience(worker_id, action_queue, experience_queue, num_steps):
-    """
-    Worker process that runs a simulation and collects experiences.
-    
-    Args:
-        worker_id: Unique ID for this worker
-        action_queue: Queue to receive actions from main process
-        experience_queue: Queue to send experiences back
-        num_steps: Number of steps to collect before sending batch
-    """
-    # Each worker has its own simulation instance
-    sim = SIM(world_file="worlds/robot_world.yaml", disable_plotting=True)
-    latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
-    
+    """Worker process that runs a simulation and collects experiences."""
+    sim = SIM(world_file="worlds/eval_world.yaml", disable_plotting=True)
+    latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
+        robot_state=None,
+        robot_goal=None,
+        random_obstacles=True,
+        random_obstacle_ids=[i + 1 for i in range(6)],
+    )
     while True:
-        # Wait for action from main process (or "reset" or "stop" command)
         cmd = action_queue.get()
         
         if cmd == "stop":
@@ -45,7 +49,6 @@ def worker_collect_experience(worker_id, action_queue, experience_queue, num_ste
                 "obs": (latest_scan, distance, cos, sin, collision, goal, a, reward)
             })
         else:
-            # cmd is an action
             lin_vel, ang_vel = cmd
             latest_scan, distance, cos, sin, collision, goal, a, reward = sim.step(
                 lin_velocity=lin_vel, ang_velocity=ang_vel
@@ -66,7 +69,6 @@ class ParallelEnvs:
         self.experience_queue = Queue()
         self.workers = []
         
-        # Start worker processes
         for i in range(num_envs):
             p = Process(
                 target=worker_collect_experience,
@@ -76,7 +78,6 @@ class ParallelEnvs:
             self.workers.append(p)
     
     def reset_all(self):
-        """Reset all environments and get initial observations."""
         for q in self.action_queues:
             q.put("reset")
         
@@ -87,12 +88,6 @@ class ParallelEnvs:
         return observations
     
     def step_all(self, actions):
-        """
-        Send actions to all environments and collect results.
-        
-        Args:
-            actions: List of (lin_vel, ang_vel) tuples, one per environment
-        """
         for i, action in enumerate(actions):
             self.action_queues[i].put(action)
         
@@ -103,7 +98,6 @@ class ParallelEnvs:
         return observations
     
     def close(self):
-        """Stop all workers."""
         for q in self.action_queues:
             q.put("stop")
         for p in self.workers:
@@ -111,43 +105,27 @@ class ParallelEnvs:
 
 
 class AsyncTrainer:
-    """
-    Handles training in a background thread so collection can continue.
-    Uses a lock to prevent race conditions between inference and training.
-    """
+    """Handles training in a background thread."""
     
     def __init__(self, model, replay_buffer, training_iterations, batch_size):
         self.model = model
         self.replay_buffer = replay_buffer
         self.training_iterations = training_iterations
         self.batch_size = batch_size
-        
-        self.train_queue = ThreadQueue()  # Queue training requests
+        self.train_queue = ThreadQueue()
         self.is_training = False
-        self.training_thread = None
         self.stop_flag = False
         self.train_count = 0
-        
-        # Lock to prevent simultaneous model access
         self.model_lock = threading.Lock()
-        
-        # Start the training thread
-        self._start_training_thread()
-    
-    def _start_training_thread(self):
-        """Start the background training thread."""
         self.training_thread = threading.Thread(target=self._training_loop, daemon=True)
         self.training_thread.start()
     
     def _training_loop(self):
-        """Background thread that processes training requests."""
         while not self.stop_flag:
             try:
-                # Wait for training request (with timeout to check stop flag)
                 request = self.train_queue.get(timeout=0.1)
                 if request == "train":
                     self.is_training = True
-                    # Acquire lock during training
                     with self.model_lock:
                         self.model.train(
                             replay_buffer=self.replay_buffer,
@@ -157,48 +135,48 @@ class AsyncTrainer:
                     self.train_count += 1
                     self.is_training = False
             except:
-                # Timeout, check stop flag and continue
                 pass
     
     def get_actions_safe(self, states_batch, add_noise):
-        """Thread-safe action inference."""
         with self.model_lock:
             return self.model.get_action_batch(states_batch, add_noise)
     
     def request_training(self):
-        """Request a training session (non-blocking)."""
-        # Only queue if not already training
         if not self.is_training and self.train_queue.empty():
             self.train_queue.put("train")
     
     def stop(self):
-        """Stop the training thread."""
         self.stop_flag = True
-        if self.training_thread:
-            self.training_thread.join(timeout=5.0)
+        self.training_thread.join(timeout=5.0)
 
 
 def main():
-    """Main training function with parallel environments."""
+    """Main training function with configurable optimizations."""
+    print("=" * 60)
+    print("DEBUG MODE - Testing optimizations separately")
+    print(f"  ENABLE_PARALLEL:       {ENABLE_PARALLEL}")
+    print(f"  ENABLE_BATCH_INFERENCE: {ENABLE_BATCH_INFERENCE}")
+    print(f"  ENABLE_ASYNC_TRAINING:  {ENABLE_ASYNC_TRAINING}")
+    print(f"  NUM_ENVS:              {NUM_ENVS if ENABLE_PARALLEL else 1}")
+    print("=" * 60)
+    
     # Configuration
     action_dim = 2
     max_action = 1
     state_dim = 185
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Training parameters
-    num_envs = min(20, cpu_count() - 4)  # Use more parallel envs, leave 4 cores for main + training
-    print(f"Using {num_envs} parallel environments")
-    
+    # Training parameters (same as rl_train.py)
+    num_envs = NUM_ENVS if ENABLE_PARALLEL else 1
     nr_eval_episodes = 10
     max_epochs = 30
     epoch = 0
-    episodes_per_epoch = 70
-    train_every_n = 6  # Train less often to prevent overfitting
-    training_iterations = 50  # Reduced iterations to prevent overfitting
-    batch_size = 256  # Fixed smaller batch size for more gradient noise
+    episodes_per_epoch = 50
+    train_every_n = 2
+    training_iterations = 50
+    batch_size = 64
     max_steps = 200
-    save_every = 100
+    save_every = 50
     
     # Initialize model
     model = CNNTD3(
@@ -208,47 +186,75 @@ def main():
         device=device,
         save_every=save_every,
         load_model=False,
-        model_name="CNNTD3_parallel",
+        model_name="CNNTD3",
     )
     
-    # Initialize parallel environments
-    envs = ParallelEnvs(num_envs=num_envs)
+    # Initialize environment(s)
+    if ENABLE_PARALLEL:
+        envs = ParallelEnvs(num_envs=num_envs)
+        observations = envs.reset_all()
+    else:
+        sim = SIM(world_file="worlds/eval_world.yaml", disable_plotting=True)
+        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
+            robot_state=None,
+            robot_goal=None,
+            random_obstacles=True,
+            random_obstacle_ids=[i + 1 for i in range(6)],
+        )
+        observations = [(latest_scan, distance, cos, sin, collision, goal, a, reward)]
     
-    # Initialize single env for evaluation
-    eval_sim = SIM(world_file="worlds/robot_world.yaml", disable_plotting=True)
-    
-    # Get replay buffer (use single sim for buffer initialization)
-    temp_sim = SIM(world_file="worlds/robot_world.yaml", disable_plotting=True)
+    # Initialize eval sim and replay buffer
+    eval_sim = SIM(world_file="worlds/eval_world.yaml", disable_plotting=True)
+    temp_sim = SIM(world_file="worlds/eval_world.yaml", disable_plotting=True)
     replay_buffer = get_buffer(model, temp_sim, False, False, 10, training_iterations, batch_size)
     
-    # Initialize async trainer (runs in background thread)
-    async_trainer = AsyncTrainer(model, replay_buffer, training_iterations, batch_size)
+    # Initialize async trainer if enabled
+    if ENABLE_ASYNC_TRAINING:
+        async_trainer = AsyncTrainer(model, replay_buffer, training_iterations, batch_size)
     
-    # Reset all environments
-    observations = envs.reset_all()
     steps = [0] * num_envs
     episode_count = 0
-    
     start_time = time.time()
     
     try:
         while epoch < max_epochs:
-            # Get states for all environments
+            # === GET STATES ===
             states = []
             for obs in observations:
                 latest_scan, distance, cos, sin, collision, goal, a, reward = obs
                 state, _ = model.prepare_state(latest_scan, distance, cos, sin, collision, goal, a)
                 states.append(state)
             
-            # Get actions using thread-safe method (prevents race condition with training)
-            states_batch = np.array(states)
-            actions_batch = async_trainer.get_actions_safe(states_batch, add_noise=True)
-            actions = [((a[0] + 1) / 4, a[1]) for a in actions_batch]
+            # === GET ACTIONS ===
+            if ENABLE_BATCH_INFERENCE and ENABLE_ASYNC_TRAINING:
+                # Batch + Async: use thread-safe method
+                states_batch = np.array(states)
+                actions_batch = async_trainer.get_actions_safe(states_batch, add_noise=True)
+                actions = [((a[0] + 1) / 4, a[1]) for a in actions_batch]
+            elif ENABLE_BATCH_INFERENCE:
+                # Batch only: use batch method directly
+                states_batch = np.array(states)
+                actions_batch = model.get_action_batch(states_batch, add_noise=True)
+                actions = [((a[0] + 1) / 4, a[1]) for a in actions_batch]
+            else:
+                # No batch: loop through states (LIKE ORIGINAL rl_train.py)
+                actions = []
+                for state in states:
+                    action = model.get_action(np.array(state), True)
+                    a_in = ((action[0] + 1) / 4, action[1])
+                    actions.append(a_in)
             
-            # Step all environments in parallel
-            next_observations = envs.step_all(actions)
+            # === STEP ENVIRONMENTS ===
+            if ENABLE_PARALLEL:
+                next_observations = envs.step_all(actions)
+            else:
+                a_in = actions[0]
+                latest_scan, distance, cos, sin, collision, goal, a, reward = sim.step(
+                    lin_velocity=a_in[0], ang_velocity=a_in[1]
+                )
+                next_observations = [(latest_scan, distance, cos, sin, collision, goal, a, reward)]
             
-            # Process results and add to replay buffer
+            # === PROCESS RESULTS ===
             for i, (obs, next_obs, action) in enumerate(zip(observations, next_observations, actions)):
                 latest_scan, distance, cos, sin, collision, goal, a, reward = obs
                 state, _ = model.prepare_state(latest_scan, distance, cos, sin, collision, goal, a)
@@ -259,19 +265,35 @@ def main():
                 replay_buffer.add(state, list(action), n_reward, terminal, next_state)
                 steps[i] += 1
                 
-                # Check for episode end
                 if terminal or steps[i] >= max_steps:
                     episode_count += 1
                     steps[i] = 0
                     
-                    # Request reset for this env
-                    envs.action_queues[i].put("reset")
-                    reset_result = envs.experience_queue.get()
-                    next_observations[reset_result["worker_id"]] = reset_result["obs"]
+                    # Reset this environment
+                    if ENABLE_PARALLEL:
+                        envs.action_queues[i].put("reset")
+                        reset_result = envs.experience_queue.get()
+                        next_observations[reset_result["worker_id"]] = reset_result["obs"]
+                    else:
+                        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
+                            robot_state=None,
+                            robot_goal=None,
+                            random_obstacles=True,
+                            random_obstacle_ids=[i + 1 for i in range(6)],
+                        )
+                        next_observations[0] = (latest_scan, distance, cos, sin, collision, goal, a, reward)
                     
-                    # Request async training (non-blocking!)
+                    # Train
                     if episode_count % train_every_n == 0:
-                        async_trainer.request_training()
+                        if ENABLE_ASYNC_TRAINING:
+                            async_trainer.request_training()
+                        else:
+                            # BLOCKING training (like original)
+                            model.train(
+                                replay_buffer=replay_buffer,
+                                iterations=training_iterations,
+                                batch_size=batch_size,
+                            )
             
             observations = next_observations
             
@@ -279,15 +301,19 @@ def main():
             if episode_count >= episodes_per_epoch:
                 epoch += 1
                 elapsed = time.time() - start_time
-                train_status = "training" if async_trainer.is_training else "idle"
-                print(f"Epoch {epoch} completed in {elapsed:.1f}s ({episode_count} episodes, {async_trainer.train_count} train cycles, trainer: {train_status})")
+                if ENABLE_ASYNC_TRAINING:
+                    print(f"Epoch {epoch} completed in {elapsed:.1f}s ({episode_count} episodes, {async_trainer.train_count} train cycles)")
+                else:
+                    print(f"Epoch {epoch} completed in {elapsed:.1f}s ({episode_count} episodes)")
                 evaluate(model, epoch, eval_sim, eval_episodes=nr_eval_episodes)
                 episode_count = 0
                 start_time = time.time()
     
     finally:
-        async_trainer.stop()
-        envs.close()
+        if ENABLE_ASYNC_TRAINING:
+            async_trainer.stop()
+        if ENABLE_PARALLEL:
+            envs.close()
 
 
 def evaluate(model, epoch, sim, eval_episodes=10):
@@ -300,7 +326,12 @@ def evaluate(model, epoch, sim, eval_episodes=10):
     
     for _ in range(eval_episodes):
         count = 0
-        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
+        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
+            robot_state=None,
+            robot_goal=None,
+            random_obstacles=True,
+            random_obstacle_ids=[i + 1 for i in range(6)],
+        )
         done = False
         while not done and count < 501:
             state, terminal = model.prepare_state(latest_scan, distance, cos, sin, collision, goal, a)
