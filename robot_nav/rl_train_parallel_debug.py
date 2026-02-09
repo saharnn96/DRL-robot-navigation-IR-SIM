@@ -9,7 +9,7 @@ This script allows testing each optimization separately to find the issue:
 Set these flags to True/False to isolate the problem.
 """
 
-from robot_nav.models.CNNTD3.CNNTD3 import CNNTD3
+from robot_nav.models.SAC.SAC import SAC
 import torch
 import numpy as np
 from multiprocessing import Process, Queue, cpu_count
@@ -23,7 +23,7 @@ from queue import Queue as ThreadQueue
 ENABLE_PARALLEL = True        # Use multiple environments (vs single)
 ENABLE_BATCH_INFERENCE = False # Use batch inference (vs loop)
 ENABLE_ASYNC_TRAINING = True  # Use async training (vs blocking)
-NUM_ENVS = 8                   # Number of parallel envs (if enabled)
+NUM_ENVS = 20                   # Number of parallel envs (if enabled)
 # =======================================
 
 
@@ -172,21 +172,21 @@ def main():
     max_epochs = 30
     epoch = 0
     episodes_per_epoch = 50
-    train_every_n = 2
+    train_every_n = 4
     training_iterations = 50
     batch_size = 64
     max_steps = 200
     save_every = 50
     
     # Initialize model
-    model = CNNTD3(
+    model = SAC(
         state_dim=state_dim,
         action_dim=action_dim,
         max_action=max_action,
         device=device,
         save_every=save_every,
         load_model=False,
-        model_name="CNNTD3",
+        model_name="SAC_static_env",
     )
     
     # Initialize environment(s)

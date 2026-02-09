@@ -160,10 +160,15 @@ class AsyncTrainer:
                 # Timeout, check stop flag and continue
                 pass
     
-    def get_actions_safe(self, states_batch, add_noise):
-        """Thread-safe action inference."""
+    def get_actions_safe(self, states, add_noise):
+        """Thread-safe per-state action inference (no batch)."""
+        actions = []
         with self.model_lock:
-            return self.model.get_action_batch(states_batch, add_noise)
+            # Call get_action for each state while holding the model lock to avoid
+            # race conditions between inference and background training.
+            for s in states:
+                actions.append(self.model.get_action(np.array(s), add_noise))
+        return actions
     
     def request_training(self):
         """Request a training session (non-blocking)."""
@@ -187,13 +192,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Training parameters
-    num_envs = min(20, cpu_count() - 4)  # Use more parallel envs, leave 4 cores for main + training
+    num_envs = min(8, cpu_count() - 4)  # Use more parallel envs, leave 4 cores for main + training
     print(f"Using {num_envs} parallel environments")
     
     nr_eval_episodes = 10
     max_epochs = 30
     epoch = 0
-    episodes_per_epoch = 70
+    episodes_per_epoch = 50
     train_every_n = 6  # Train less often to prevent overfitting
     training_iterations = 50  # Reduced iterations to prevent overfitting
     batch_size = 256  # Fixed smaller batch size for more gradient noise
@@ -208,7 +213,7 @@ def main():
         device=device,
         save_every=save_every,
         load_model=False,
-        model_name="CNNTD3_parallel",
+        model_name="CNNTD3_parallel_no_batch",
     )
     
     # Initialize parallel environments
@@ -240,9 +245,8 @@ def main():
                 state, _ = model.prepare_state(latest_scan, distance, cos, sin, collision, goal, a)
                 states.append(state)
             
-            # Get actions using thread-safe method (prevents race condition with training)
-            states_batch = np.array(states)
-            actions_batch = async_trainer.get_actions_safe(states_batch, add_noise=True)
+            # Get actions using thread-safe per-environment inference (no batch)
+            actions_batch = async_trainer.get_actions_safe(states, add_noise=True)
             actions = [((a[0] + 1) / 4, a[1]) for a in actions_batch]
             
             # Step all environments in parallel
