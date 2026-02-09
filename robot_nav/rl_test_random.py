@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 
 import torch
 from robot_nav.SIM_ENV.sim import SIM
+from robot_nav.models.SAC.SAC import SAC
 
 
 def main(args=None):
@@ -26,7 +27,7 @@ def main(args=None):
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="CNNTD3_debug_test4",
+        model_name="CNNTD3"
     )  # instantiate a model
 
     sim = SIM(

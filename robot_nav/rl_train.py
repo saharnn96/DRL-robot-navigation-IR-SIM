@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from robot_nav.SIM_ENV.sim import SIM
 from utils import get_buffer
+from robot_nav.training_log import log_training_run
 
 
 def main(args=None):
@@ -60,6 +61,31 @@ def main(args=None):
 
     print(f"Starting training: {max_epochs} epochs, {episodes_per_epoch} episodes/epoch")
     print(f"Training on device: {device}")
+
+    # Record this training run to TRAINING_LOG.md
+    try:
+        log_training_run({
+            "script": "rl_train.py",
+            "model": type(model).__name__ if hasattr(model, "__class__") else str(model),
+            "model_name": getattr(model, "model_name", ""),
+            "device": str(device),
+            "state_dim": state_dim,
+            "action_dim": action_dim,
+            "max_epochs": max_epochs,
+            "epoch": epoch,
+            "num_envs": 1,
+            "parallel": False,
+            "batch_inference": False,
+            "async_training": False,
+            "episodes_per_epoch": episodes_per_epoch,
+            "train_every_n": train_every_n,
+            "training_iterations": training_iterations,
+            "batch_size": batch_size,
+            "save_every": save_every,
+            "load_model": getattr(model, "load_model", False),
+        })
+    except Exception:
+        pass
 
     while epoch < max_epochs:  # train until max_epochs is reached
         state, terminal = model.prepare_state(

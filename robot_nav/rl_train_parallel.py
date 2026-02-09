@@ -11,7 +11,9 @@ import torch
 import numpy as np
 from multiprocessing import Process, Queue, cpu_count
 from robot_nav.SIM_ENV.sim import SIM
+from robot_nav.models.SAC.SAC import SAC
 from utils import get_buffer
+from robot_nav.training_log import log_training_run
 import time
 import threading
 from queue import Queue as ThreadQueue
@@ -196,14 +198,16 @@ def main():
     print(f"Using {num_envs} parallel environments")
     
     nr_eval_episodes = 10
-    max_epochs = 30
+    max_epochs = 50
     epoch = 0
     episodes_per_epoch = 50
-    train_every_n = 6  # Train less often to prevent overfitting
+    train_every_n = 2 # Train less often to prevent overfitting
     training_iterations = 50  # Reduced iterations to prevent overfitting
     batch_size = 256  # Fixed smaller batch size for more gradient noise
     max_steps = 200
-    save_every = 100
+    save_every = 50
+    
+
     
     # Initialize model
     model = CNNTD3(
@@ -212,10 +216,34 @@ def main():
         max_action=max_action,
         device=device,
         save_every=save_every,
-        load_model=False,
+        load_model=True,
         model_name="CNNTD3_parallel_no_batch",
     )
-    
+        # Log training run parameters (before model init)
+    # Log training run parameters
+    try:
+        log_training_run({
+            "script": "rl_train_parallel.py",
+            "model": type(model).__name__,
+            "model_name": getattr(model, "model_name", ""),
+            "device": str(device),
+            "state_dim": state_dim,
+            "action_dim": action_dim,
+            "max_epochs": max_epochs,
+            "epoch": epoch,
+            "num_envs": num_envs,
+            "parallel": True,
+            "batch_inference": False,
+            "async_training": True,
+            "episodes_per_epoch": episodes_per_epoch,
+            "train_every_n": train_every_n,
+            "training_iterations": training_iterations,
+            "batch_size": batch_size,
+            "save_every": save_every,
+            "load_model": model.load_model if hasattr(model, "load_model") else False,
+        })
+    except Exception:
+        pass
     # Initialize parallel environments
     envs = ParallelEnvs(num_envs=num_envs)
     

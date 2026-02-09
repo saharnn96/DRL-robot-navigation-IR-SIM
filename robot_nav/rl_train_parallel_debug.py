@@ -12,6 +12,7 @@ Set these flags to True/False to isolate the problem.
 from robot_nav.models.SAC.SAC import SAC
 import torch
 import numpy as np
+from robot_nav.training_log import log_training_run
 from multiprocessing import Process, Queue, cpu_count
 from robot_nav.SIM_ENV.sim import SIM
 from utils import get_buffer
@@ -188,6 +189,31 @@ def main():
         load_model=False,
         model_name="SAC_static_env",
     )
+
+    # Log training run parameters
+    try:
+        log_training_run({
+            "script": "rl_train_parallel_debug.py",
+            "model": type(model).__name__,
+            "model_name": getattr(model, "model_name", ""),
+            "device": str(device),
+            "state_dim": state_dim,
+            "action_dim": action_dim,
+            "max_epochs": max_epochs,
+            "epoch": epoch,
+            "num_envs": num_envs,
+            "parallel": ENABLE_PARALLEL,
+            "batch_inference": ENABLE_BATCH_INFERENCE,
+            "async_training": ENABLE_ASYNC_TRAINING,
+            "episodes_per_epoch": episodes_per_epoch,
+            "train_every_n": train_every_n,
+            "training_iterations": training_iterations,
+            "batch_size": batch_size,
+            "save_every": save_every,
+            "load_model": False,
+        })
+    except Exception:
+        pass
     
     # Initialize environment(s)
     if ENABLE_PARALLEL:
