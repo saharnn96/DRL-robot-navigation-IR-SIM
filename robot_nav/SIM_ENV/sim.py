@@ -105,7 +105,7 @@ class SIM(SIM_ENV):
             self.env.random_obstacle_position(
                 range_low=[0, 0, -3.14],
                 range_high=[10, 10, 3.14],
-                ids=random_obstacle_ids,
+                ids=random_obstacle_ids[2:],
                 non_overlapping=True,
             )
 

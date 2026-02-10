@@ -29,7 +29,7 @@ def worker_collect_experience(worker_id, action_queue, experience_queue, num_ste
         num_steps: Number of steps to collect before sending batch
     """
     # Each worker has its own simulation instance
-    sim = SIM(world_file="worlds/robot_world.yaml", disable_plotting=True)
+    sim = SIM(world_file="worlds/robot_world_1.yaml", disable_plotting=True)
     latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
     
     while True:
@@ -142,7 +142,7 @@ def worker_eval_episode(worker_id, world_file, model_state_dict, model_class_nam
     action_dim = model_state_dict["action_dim"]
     max_action = model_state_dict["max_action"]
     
-    actor = Actor(state_dim, action_dim, max_action).to(device)
+    actor = Actor(action_dim).to(device)
 
     # Load the model weights
     actor.load_state_dict(model_state_dict["actor"])
@@ -157,8 +157,14 @@ def worker_eval_episode(worker_id, world_file, model_state_dict, model_class_nam
     done = False
     
     while not done and steps < max_steps:
-        # Manually prepare state (avoiding model.prepare_state to not need full model)
-        state = np.concatenate((latest_scan, [distance, cos, sin, collision, goal]))
+        # Reproduce model.prepare_state normalization
+        scan = np.array(latest_scan, dtype=np.float32)
+        scan[np.isinf(scan)] = 7.0
+        scan /= 7.0
+        norm_dist = distance / 10.0
+        lin_vel = a[0] * 2
+        ang_vel_norm = (a[1] + 1) / 2
+        state = np.concatenate((scan, [norm_dist, cos, sin, lin_vel, ang_vel_norm]))
         
         # Get action directly from actor
         with torch.no_grad():
@@ -340,7 +346,7 @@ def main():
     print(f"Using {num_envs} parallel environments")
     
     nr_eval_episodes = 10
-    max_epochs = 50
+    max_epochs = 30
     epoch = 0
     episodes_per_epoch = 50
     train_every_n = 2 # Train less often to prevent overfitting
@@ -358,8 +364,8 @@ def main():
         max_action=max_action,
         device=device,
         save_every=save_every,
-        load_model=True,
-        model_name="CNNTD3_parallel_base",
+        load_model=False,
+        model_name="CNNTD3_parallel_world1_base",
     )
         # Log training run parameters (before model init)
     # Log training run parameters
@@ -390,10 +396,10 @@ def main():
     envs = ParallelEnvs(num_envs=num_envs)
     
     # Initialize single env for evaluation
-    eval_sim = SIM(world_file="worlds/robot_world.yaml", disable_plotting=True)
+    eval_sim = SIM(world_file="worlds/robot_world_1.yaml", disable_plotting=True)
     
     # Get replay buffer (use single sim for buffer initialization)
-    temp_sim = SIM(world_file="worlds/robot_world.yaml", disable_plotting=True)
+    temp_sim = SIM(world_file="worlds/robot_world_1.yaml", disable_plotting=True)
     replay_buffer = get_buffer(model, temp_sim, False, False, 10, training_iterations, batch_size)
     
     # Initialize async trainer (runs in background thread)
@@ -474,7 +480,7 @@ def evaluate(model, epoch, sim, eval_episodes=10):
     # Run evaluation in parallel
     results = ParallelEvaluator.evaluate_parallel(
         model=model,
-        world_file="worlds/robot_world.yaml",
+        world_file="worlds/robot_world_1.yaml",
         num_episodes=eval_episodes,
         max_steps=501
     )

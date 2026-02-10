@@ -7,9 +7,34 @@ import matplotlib.pyplot as plt
 
 import torch
 from robot_nav.SIM_ENV.sim import SIM
-from robot_nav.models.SAC.SAC import SAC
+import shutil
+import os
+from datetime import datetime
+from pathlib import Path
+
+def clear_simulation_cache():
+    """Safely clear simulation cache: move `runs/` to a timestamped backup and remove `data.yml` if present."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    runs_dir = Path("runs")
+    if runs_dir.exists() and runs_dir.is_dir():
+        backup = Path(f"runs_backup_{ts}")
+        try:
+            shutil.move(str(runs_dir), str(backup))
+            print(f"Moved runs/ to {backup}")
+        except Exception as e:
+            print(f"Warning: failed to move runs/: {e}")
+    data_file = Path("robot_nav/assets/data.yml")
+    if data_file.exists():
+        try:
+            data_file.unlink()
+            print("Removed robot_nav/assets/data.yml")
+        except Exception as e:
+            print(f"Warning: failed to remove data.yml: {e}")
+
 
 def main(args=None):
+    # clear caches before running tests
+    clear_simulation_cache()
     """Main testing function"""
     action_dim = 2  # number of actions produced by the model
     max_action = 1  # maximum absolute value of output actions
@@ -27,11 +52,12 @@ def main(args=None):
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="CNNTD3_base"
+        model_name="CNNTD3_parallel3"
     )  # instantiate a model
 
     sim = SIM(
-        world_file="worlds/eval_world.yaml", disable_plotting=False
+        # world_file="worlds/eval_world.yaml", disable_plotting=False
+        world_file="worlds/robot_world_3.yaml", disable_plotting=False
     )  # instantiate environment
     print("..............................................")
     print(f"Testing {test_scenarios} scenarios")
@@ -47,12 +73,14 @@ def main(args=None):
     for _ in tqdm.tqdm(range(test_scenarios)):
         count = 0
         ep_reward = 0
-        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
-            robot_state=None,
-            robot_goal=None,
-            random_obstacles=True,
-            random_obstacle_ids=[i + 1 for i in range(6)],
-        )
+        # latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
+        #     robot_state=None,
+        #     robot_goal=None,
+        #     random_obstacles=True,
+        #     random_obstacle_ids=[i + 1 for i in range(6)],
+        # )
+        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
+
         done = False
         while not done and count < max_steps:
             state, terminal = model.prepare_state(
