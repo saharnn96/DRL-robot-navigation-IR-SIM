@@ -346,8 +346,8 @@ def main():
     print(f"Using {num_envs} parallel environments")
     
     nr_eval_episodes = 10
-    max_epochs = 50
-    epoch = 0
+    max_epochs = 70
+    epoch = 40
     episodes_per_epoch = 50
     train_every_n = 2 # Train less often to prevent overfitting
     training_iterations = 50  # Reduced iterations to prevent overfitting
@@ -364,8 +364,8 @@ def main():
         max_action=max_action,
         device=device,
         save_every=save_every,
-        load_model=False,
-        model_name="CNNTD3_parallel_world1_base",
+        load_model=True,
+        model_name="CNNTD3_parallel_world1",
     )
         # Log training run parameters (before model init)
     # Log training run parameters
