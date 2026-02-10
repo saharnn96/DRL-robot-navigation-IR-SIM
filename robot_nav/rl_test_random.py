@@ -33,7 +33,7 @@ def main(args=None):
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="CNNTD3_parallel_world1_base"
+        model_name="CNNTD3_parallel_world1"
     )  # instantiate a model
 
     sim = SIM(
