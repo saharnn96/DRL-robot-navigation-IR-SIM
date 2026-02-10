@@ -33,12 +33,12 @@ def main(args=None):
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="CNNTD3_parallel_world1"
+        model_name="CNNTD3_parallel_world3"
     )  # instantiate a model
 
     sim = SIM(
         # world_file="worlds/eval_world.yaml", disable_plotting=False
-        world_file="worlds/robot_world_1.yaml", disable_plotting=False
+        world_file="worlds/robot_world_3.yaml", disable_plotting=False
     )  # instantiate environment
     print("..............................................")
     print(f"Testing {test_scenarios} scenarios")
