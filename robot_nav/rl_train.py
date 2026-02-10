@@ -16,7 +16,7 @@ def main(args=None):
         "cuda" if torch.cuda.is_available() else "cpu"
     )  # using cuda if it is available, cpu otherwise
     nr_eval_episodes = 10  # how many episodes to use to run evaluation
-    max_epochs = 30  # max number of epochs
+    max_epochs = 50  # max number of epochs
     epoch = 0  # starting epoch number
     episodes_per_epoch = 50  # how many episodes to run in single epoch
     episode = 0  # starting episode number
@@ -38,8 +38,8 @@ def main(args=None):
         max_action=max_action,
         device=device,
         save_every=save_every,
-        load_model=True,
-        model_name="CNNTD3",
+        load_model=False,
+        model_name="CNNTD3_base",
     )  # instantiate a model
 
     sim = SIM(

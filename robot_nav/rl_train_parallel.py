@@ -11,7 +11,6 @@ import torch
 import numpy as np
 from multiprocessing import Process, Queue, cpu_count
 from robot_nav.SIM_ENV.sim import SIM
-from robot_nav.models.SAC.SAC import SAC
 from utils import get_buffer
 from robot_nav.training_log import log_training_run
 import time
@@ -112,6 +111,149 @@ class ParallelEnvs:
             p.join()
 
 
+def worker_eval_episode(worker_id, world_file, model_state_dict, model_class_name, device_str, result_queue, max_steps=501):
+    """
+    Worker process that runs a single evaluation episode.
+    
+    Args:
+        worker_id: Unique ID for this worker
+        world_file: Path to world file for simulation
+        model_state_dict: Dictionary containing actor/critic state dicts
+        model_class_name: Name of the model class ("CNNTD3", "SAC", etc.)
+        device_str: Device string ("cuda" or "cpu")
+        result_queue: Queue to send episode results back
+        max_steps: Maximum steps per episode
+    """
+    # Import here to avoid issues with multiprocessing
+    import torch
+    import numpy as np
+    from robot_nav.SIM_ENV.sim import SIM
+    
+    # Dynamically import the actor class ONLY (not full model to avoid TensorBoard writer)
+    from robot_nav.models.CNNTD3.CNNTD3 import Actor
+
+    
+    # Create simulation environment
+    sim = SIM(world_file=world_file, disable_plotting=True)
+    
+    # Reconstruct ONLY actor network (no TensorBoard writer!)
+    device = torch.device(device_str)
+    state_dim = model_state_dict["state_dim"]
+    action_dim = model_state_dict["action_dim"]
+    max_action = model_state_dict["max_action"]
+    
+    actor = Actor(state_dim, action_dim, max_action).to(device)
+
+    # Load the model weights
+    actor.load_state_dict(model_state_dict["actor"])
+    actor.eval()
+    
+    # Run one episode
+    latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
+    episode_reward = 0.0
+    collisions = 0
+    goals_reached = 0
+    steps = 0
+    done = False
+    
+    while not done and steps < max_steps:
+        # Manually prepare state (avoiding model.prepare_state to not need full model)
+        state = np.concatenate((latest_scan, [distance, cos, sin, collision, goal]))
+        
+        # Get action directly from actor
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+            action_tensor = actor(state_tensor)
+            action = action_tensor.cpu().numpy()[0]
+        
+        a_in = [(action[0] + 1) / 4, action[1]]
+        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.step(
+            lin_velocity=a_in[0], ang_velocity=a_in[1]
+        )
+        
+        episode_reward += reward
+        steps += 1
+        
+        if collision:
+            collisions = 1
+        if goal:
+            goals_reached = 1
+        done = collision or goal
+    
+    # Send results back
+    result_queue.put({
+        "worker_id": worker_id,
+        "reward": episode_reward,
+        "collisions": collisions,
+        "goals": goals_reached,
+        "steps": steps,
+    })
+
+
+class ParallelEvaluator:
+    """
+    Manages parallel evaluation of multiple episodes.
+    Each episode runs in its own process for true parallelism.
+    """
+    
+    @staticmethod
+    def evaluate_parallel(model, world_file, num_episodes=10, max_steps=501):
+        """
+        Run evaluation episodes in parallel.
+        
+        Args:
+            model: The RL model to evaluate
+            world_file: Path to world configuration file
+            num_episodes: Number of episodes to run
+            max_steps: Maximum steps per episode
+            
+        Returns:
+            dict with avg_reward, avg_collisions, avg_goals
+        """
+        result_queue = Queue()
+        processes = []
+        
+        # Prepare model state for multiprocessing
+        model_state = {
+            "state_dim": model.state_dim,
+            "action_dim": model.action_dim,
+            "max_action": model.max_action,
+            "actor": model.actor.state_dict(),
+        }
+        
+        model_class_name = type(model).__name__
+        device_str = str(model.device)
+        
+        # Start worker processes
+        for i in range(num_episodes):
+            p = Process(
+                target=worker_eval_episode,
+                args=(i, world_file, model_state, model_class_name, device_str, result_queue, max_steps)
+            )
+            p.start()
+            processes.append(p)
+        
+        # Collect results
+        results = []
+        for _ in range(num_episodes):
+            results.append(result_queue.get())
+        
+        # Wait for all processes to finish
+        for p in processes:
+            p.join()
+        
+        # Aggregate results
+        total_reward = sum(r["reward"] for r in results)
+        total_collisions = sum(r["collisions"] for r in results)
+        total_goals = sum(r["goals"] for r in results)
+        
+        return {
+            "avg_reward": total_reward / num_episodes,
+            "avg_collisions": total_collisions / num_episodes,
+            "avg_goals": total_goals / num_episodes,
+        }
+
+
 class AsyncTrainer:
     """
     Handles training in a background thread so collection can continue.
@@ -194,7 +336,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Training parameters
-    num_envs = min(8, cpu_count() - 4)  # Use more parallel envs, leave 4 cores for main + training
+    num_envs = min(20, cpu_count() - 4)  # Use more parallel envs, leave 4 cores for main + training
     print(f"Using {num_envs} parallel environments")
     
     nr_eval_episodes = 10
@@ -217,7 +359,7 @@ def main():
         device=device,
         save_every=save_every,
         load_model=True,
-        model_name="CNNTD3_parallel_no_batch",
+        model_name="CNNTD3_parallel_base",
     )
         # Log training run parameters (before model init)
     # Log training run parameters
@@ -323,42 +465,36 @@ def main():
 
 
 def evaluate(model, epoch, sim, eval_episodes=10):
-    """Evaluate the model."""
+    """Evaluate the model using parallel episodes."""
     print("..............................................")
-    print(f"Epoch {epoch}. Evaluating scenarios")
-    avg_reward = 0.0
-    col = 0
-    goals = 0
+    print(f"Epoch {epoch}. Evaluating {eval_episodes} scenarios in parallel")
     
-    for _ in range(eval_episodes):
-        count = 0
-        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
-        done = False
-        while not done and count < 501:
-            state, terminal = model.prepare_state(latest_scan, distance, cos, sin, collision, goal, a)
-            action = model.get_action(np.array(state), False)
-            a_in = [(action[0] + 1) / 4, action[1]]
-            latest_scan, distance, cos, sin, collision, goal, a, reward = sim.step(
-                lin_velocity=a_in[0], ang_velocity=a_in[1]
-            )
-            avg_reward += reward
-            count += 1
-            if collision:
-                col += 1
-            if goal:
-                goals += 1
-            done = collision or goal
+    eval_start = time.time()
     
-    avg_reward /= eval_episodes
-    avg_col = col / eval_episodes
-    avg_goal = goals / eval_episodes
-    print(f"Average Reward: {avg_reward}")
-    print(f"Average Collision rate: {avg_col}")
-    print(f"Average Goal rate: {avg_goal}")
+    # Run evaluation in parallel
+    results = ParallelEvaluator.evaluate_parallel(
+        model=model,
+        world_file="worlds/robot_world.yaml",
+        num_episodes=eval_episodes,
+        max_steps=501
+    )
+    
+    eval_time = time.time() - eval_start
+    
+    avg_reward = results["avg_reward"]
+    avg_col = results["avg_collisions"]
+    avg_goal = results["avg_goals"]
+    
+    print(f"Evaluation completed in {eval_time:.2f}s")
+    print(f"Average Reward: {avg_reward:.4f}")
+    print(f"Average Collision rate: {avg_col:.4f}")
+    print(f"Average Goal rate: {avg_goal:.4f}")
     print("..............................................")
+    
     model.writer.add_scalar("eval/avg_reward", avg_reward, epoch)
     model.writer.add_scalar("eval/avg_col", avg_col, epoch)
     model.writer.add_scalar("eval/avg_goal", avg_goal, epoch)
+    model.writer.add_scalar("eval/eval_time", eval_time, epoch)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ This script allows testing each optimization separately to find the issue:
 Set these flags to True/False to isolate the problem.
 """
 
-from robot_nav.models.SAC.SAC import SAC
+from robot_nav.models.CNNTD3.CNNTD3 import CNNTD3
 import torch
 import numpy as np
 from robot_nav.training_log import log_training_run
@@ -24,7 +24,8 @@ from queue import Queue as ThreadQueue
 ENABLE_PARALLEL = True        # Use multiple environments (vs single)
 ENABLE_BATCH_INFERENCE = False # Use batch inference (vs loop)
 ENABLE_ASYNC_TRAINING = True  # Use async training (vs blocking)
-NUM_ENVS = 20                   # Number of parallel envs (if enabled)
+ENABLE_PARALLEL_EVAL = True   # Run evaluation episodes in parallel
+NUM_ENVS = 8                   # Number of parallel envs (if enabled)
 # =======================================
 
 
@@ -105,6 +106,185 @@ class ParallelEnvs:
             p.join()
 
 
+def worker_eval_episode(worker_id, world_file, model_state_dict, model_class_name, device_str, result_queue, random_obstacles=True, max_steps=501):
+    """
+    Worker process that runs a single evaluation episode.
+    
+    Args:
+        worker_id: Unique ID for this worker
+        world_file: Path to world file for simulation
+        model_state_dict: Dictionary containing actor/critic state dicts
+        model_class_name: Name of the model class ("CNNTD3", "SAC", etc.)
+        device_str: Device string ("cuda" or "cpu")
+        result_queue: Queue to send episode results back
+        random_obstacles: Whether to use random obstacles
+        max_steps: Maximum steps per episode
+    """
+    # Import here to avoid issues with multiprocessing
+    import torch
+    import numpy as np
+    from robot_nav.SIM_ENV.sim import SIM
+    
+    # Dynamically import the actor class ONLY (not full model to avoid TensorBoard writer)
+    if model_class_name == "CNNTD3":
+        from robot_nav.models.CNNTD3.CNNTD3 import Actor
+    elif model_class_name == "SAC":
+        from robot_nav.models.SAC.SAC_actor import DiagGaussianActor as Actor
+    else:
+        raise ValueError(f"Unknown model class: {model_class_name}")
+    
+    # Create simulation environment
+    sim = SIM(world_file=world_file, disable_plotting=True)
+    
+    # Reconstruct ONLY actor network (no TensorBoard writer!)
+    device = torch.device(device_str)
+    state_dim = model_state_dict["state_dim"]
+    action_dim = model_state_dict["action_dim"]
+    max_action = model_state_dict["max_action"]
+    
+    if model_class_name == "CNNTD3":
+        actor = Actor(action_dim).to(device)
+    elif model_class_name == "SAC":
+        actor = Actor(
+            obs_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dim=1024,
+            hidden_depth=2,
+            log_std_bounds=[-5, 2]
+        ).to(device)
+    
+    # Load the model weights
+    actor.load_state_dict(model_state_dict["actor"])
+    actor.eval()
+    
+    # Run one episode
+    if random_obstacles:
+        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
+            robot_state=None,
+            robot_goal=None,
+            random_obstacles=True,
+            random_obstacle_ids=[i + 1 for i in range(6)],
+        )
+    else:
+        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset()
+    
+    episode_reward = 0.0
+    collisions = 0
+    goals_reached = 0
+    steps = 0
+    done = False
+    
+    while not done and steps < max_steps:
+        # Reproduce model.prepare_state normalization
+        scan = np.array(latest_scan, dtype=np.float32)
+        scan[np.isinf(scan)] = 7.0
+        scan /= 7.0
+        norm_dist = distance / 10.0
+        lin_vel = a[0] * 2
+        ang_vel_norm = (a[1] + 1) / 2
+        state = np.concatenate((scan, [norm_dist, cos, sin, lin_vel, ang_vel_norm]))
+        
+        # Get action directly from actor
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+            output = actor(state_tensor)
+            # SAC actor returns a distribution; CNNTD3 returns a tensor
+            if hasattr(output, 'mean'):
+                action_tensor = output.mean
+            else:
+                action_tensor = output
+            action = action_tensor.cpu().numpy()[0]
+        
+        a_in = [(action[0] + 1) / 4, action[1]]
+        
+        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.step(
+            lin_velocity=a_in[0], ang_velocity=a_in[1]
+        )
+        
+        episode_reward += reward
+        steps += 1
+        
+        if collision:
+            collisions = 1
+        if goal:
+            goals_reached = 1
+        done = collision or goal
+    
+    # Send results back
+    result_queue.put({
+        "worker_id": worker_id,
+        "reward": episode_reward,
+        "collisions": collisions,
+        "goals": goals_reached,
+        "steps": steps,
+    })
+
+
+class ParallelEvaluator:
+    """
+    Manages parallel evaluation of multiple episodes.
+    Each episode runs in its own process for true parallelism.
+    """
+    
+    @staticmethod
+    def evaluate_parallel(model, world_file, num_episodes=10, random_obstacles=True, max_steps=501):
+        """
+        Run evaluation episodes in parallel.
+        
+        Args:
+            model: The RL model to evaluate
+            world_file: Path to world configuration file
+            num_episodes: Number of episodes to run
+            random_obstacles: Whether to use random obstacles
+            max_steps: Maximum steps per episode
+            
+        Returns:
+            dict with avg_reward, avg_collisions, avg_goals
+        """
+        result_queue = Queue()
+        processes = []
+        
+        # Prepare model state for multiprocessing
+        model_state = {
+            "state_dim": model.state_dim,
+            "action_dim": model.action_dim,
+            "max_action": model.max_action,
+            "actor": model.actor.state_dict(),
+        }
+        
+        model_class_name = type(model).__name__
+        device_str = str(model.device)
+        
+        # Start worker processes
+        for i in range(num_episodes):
+            p = Process(
+                target=worker_eval_episode,
+                args=(i, world_file, model_state, model_class_name, device_str, result_queue, random_obstacles, max_steps)
+            )
+            p.start()
+            processes.append(p)
+        
+        # Collect results
+        results = []
+        for _ in range(num_episodes):
+            results.append(result_queue.get())
+        
+        # Wait for all processes to finish
+        for p in processes:
+            p.join()
+        
+        # Aggregate results
+        total_reward = sum(r["reward"] for r in results)
+        total_collisions = sum(r["collisions"] for r in results)
+        total_goals = sum(r["goals"] for r in results)
+        
+        return {
+            "avg_reward": total_reward / num_episodes,
+            "avg_collisions": total_collisions / num_episodes,
+            "avg_goals": total_goals / num_episodes,
+        }
+
+
 class AsyncTrainer:
     """Handles training in a background thread."""
     
@@ -170,30 +350,30 @@ def main():
     # Training parameters (same as rl_train.py)
     num_envs = NUM_ENVS if ENABLE_PARALLEL else 1
     nr_eval_episodes = 10
-    max_epochs = 30
-    epoch = 0
+    max_epochs = 80
+    epoch = 50
     episodes_per_epoch = 50
-    train_every_n = 4
+    train_every_n = 2
     training_iterations = 50
-    batch_size = 64
+    batch_size = 256
     max_steps = 200
     save_every = 50
     
     # Initialize model
-    model = SAC(
+    model = CNNTD3(
         state_dim=state_dim,
         action_dim=action_dim,
         max_action=max_action,
         device=device,
         save_every=save_every,
         load_model=False,
-        model_name="SAC_static_env",
+        model_name="CNNTD3_parallel8_sim2",
     )
 
     # Log training run parameters
     try:
         log_training_run({
-            "script": "rl_train_parallel_debug.py",
+            "script": "rl_train_parallel_twin.py",
             "model": type(model).__name__,
             "model_name": getattr(model, "model_name", ""),
             "device": str(device),
@@ -343,47 +523,69 @@ def main():
 
 
 def evaluate(model, epoch, sim, eval_episodes=10):
-    """Evaluate the model."""
+    """Evaluate the model, either in parallel or sequentially depending on the flag."""
     print("..............................................")
-    print(f"Epoch {epoch}. Evaluating scenarios")
-    avg_reward = 0.0
-    col = 0
-    goals = 0
-    
-    for _ in range(eval_episodes):
-        count = 0
-        latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
-            robot_state=None,
-            robot_goal=None,
+    mode = "parallel" if ENABLE_PARALLEL_EVAL else "sequential"
+    print(f"Epoch {epoch}. Evaluating {eval_episodes} scenarios ({mode})")
+
+    eval_start = time.time()
+
+    if ENABLE_PARALLEL_EVAL:
+        # Run evaluation in parallel
+        results = ParallelEvaluator.evaluate_parallel(
+            model=model,
+            world_file="worlds/eval_world.yaml",
+            num_episodes=eval_episodes,
             random_obstacles=True,
-            random_obstacle_ids=[i + 1 for i in range(6)],
+            max_steps=501,
         )
-        done = False
-        while not done and count < 501:
-            state, terminal = model.prepare_state(latest_scan, distance, cos, sin, collision, goal, a)
-            action = model.get_action(np.array(state), False)
-            a_in = [(action[0] + 1) / 4, action[1]]
-            latest_scan, distance, cos, sin, collision, goal, a, reward = sim.step(
-                lin_velocity=a_in[0], ang_velocity=a_in[1]
+        eval_time = time.time() - eval_start
+        avg_reward = results["avg_reward"]
+        avg_col = results["avg_collisions"]
+        avg_goal = results["avg_goals"]
+    else:
+        # Sequential fallback (original behavior)
+        total_reward = 0.0
+        total_col = 0
+        total_goals = 0
+        for _ in range(eval_episodes):
+            count = 0
+            latest_scan, distance, cos, sin, collision, goal, a, reward = sim.reset(
+                robot_state=None,
+                robot_goal=None,
+                random_obstacles=True,
+                random_obstacle_ids=[i + 1 for i in range(6)],
             )
-            avg_reward += reward
-            count += 1
-            if collision:
-                col += 1
-            if goal:
-                goals += 1
-            done = collision or goal
-    
-    avg_reward /= eval_episodes
-    avg_col = col / eval_episodes
-    avg_goal = goals / eval_episodes
-    print(f"Average Reward: {avg_reward}")
-    print(f"Average Collision rate: {avg_col}")
-    print(f"Average Goal rate: {avg_goal}")
+            done = False
+            while not done and count < 501:
+                state, terminal = model.prepare_state(latest_scan, distance, cos, sin, collision, goal, a)
+                action = model.get_action(np.array(state), False)
+                a_in = [(action[0] + 1) / 4, action[1]]
+                latest_scan, distance, cos, sin, collision, goal, a, reward = sim.step(
+                    lin_velocity=a_in[0], ang_velocity=a_in[1]
+                )
+                total_reward += reward
+                count += 1
+                if collision:
+                    total_col += 1
+                if goal:
+                    total_goals += 1
+                done = collision or goal
+        eval_time = time.time() - eval_start
+        avg_reward = total_reward / eval_episodes
+        avg_col = total_col / eval_episodes
+        avg_goal = total_goals / eval_episodes
+
+    print(f"Evaluation completed in {eval_time:.2f}s")
+    print(f"Average Reward: {avg_reward:.4f}")
+    print(f"Average Collision rate: {avg_col:.4f}")
+    print(f"Average Goal rate: {avg_goal:.4f}")
     print("..............................................")
+
     model.writer.add_scalar("eval/avg_reward", avg_reward, epoch)
     model.writer.add_scalar("eval/avg_col", avg_col, epoch)
     model.writer.add_scalar("eval/avg_goal", avg_goal, epoch)
+    model.writer.add_scalar("eval/eval_time", eval_time, epoch)
 
 
 if __name__ == "__main__":

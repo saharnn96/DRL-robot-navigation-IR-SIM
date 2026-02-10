@@ -1,3 +1,4 @@
+
 from robot_nav.models.CNNTD3.CNNTD3 import CNNTD3
 import statistics
 import numpy as np
@@ -7,7 +8,6 @@ import matplotlib.pyplot as plt
 import torch
 from robot_nav.SIM_ENV.sim import SIM
 from robot_nav.models.SAC.SAC import SAC
-
 
 def main(args=None):
     """Main testing function"""
@@ -27,7 +27,7 @@ def main(args=None):
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="CNNTD3"
+        model_name="CNNTD3_base"
     )  # instantiate a model
 
     sim = SIM(
