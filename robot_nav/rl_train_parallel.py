@@ -346,7 +346,7 @@ def main():
     print(f"Using {num_envs} parallel environments")
     
     nr_eval_episodes = 10
-    max_epochs = 30
+    max_epochs = 50
     epoch = 0
     episodes_per_epoch = 50
     train_every_n = 2 # Train less often to prevent overfitting

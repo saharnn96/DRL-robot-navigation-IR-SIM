@@ -17,3 +17,4 @@
 | 2026-02-10 16:06:05 | rl_train_parallel.py | CNNTD3 | CNNTD3_parallel_world0_base | cuda | 185 | 2 | 80 | 50 | 20 | Yes | No | Yes | 50 | 2 | 50 | 256 | 50 | No |
 | 2026-02-10 16:06:27 | rl_train_parallel.py | CNNTD3 | CNNTD3_parallel_world0_base | cuda | 185 | 2 | 80 | 50 | 20 | Yes | No | Yes | 50 | 2 | 50 | 256 | 50 | No |
 | 2026-02-10 16:08:28 | rl_train_parallel.py | CNNTD3 | CNNTD3_parallel_world1_base | cuda | 185 | 2 | 30 |  | 20 | Yes | No | Yes | 50 | 2 | 50 | 256 | 50 | No |
+| 2026-02-10 17:20:19 | rl_train_parallel.py | CNNTD3 | CNNTD3_parallel_world1_base | cuda | 185 | 2 | 50 |  | 20 | Yes | No | Yes | 50 | 2 | 50 | 256 | 50 | No |
