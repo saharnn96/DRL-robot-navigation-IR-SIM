@@ -38,6 +38,12 @@ obstacle:
       } # vertices
     kinematics: { name: "static" }
     state: [0, 0, 0]
+  - shape: { name: "circle", radius: 0.8 }
+    state: [5, 2, 1]
+    kinematics: { name: "static" }
+  - shape: { name: "rectangle", length: 1.0, width: 1.2 }
+    state: [6, 5, 1]
+    kinematics: { name: "static" }
 
   - number: 1
     kinematics: { name: "omni" }
@@ -58,10 +64,4 @@ obstacle:
     shape:
       - { name: "circle", radius: 0.6, random_shape: True }
 
-  - shape: { name: "circle", radius: 0.8 }
-    state: [5, 2, 1]
-    kinematics: { name: "static" }
-  - shape: { name: "rectangle", length: 1.0, width: 1.2 }
-    state: [6, 5, 1]
-    kinematics: { name: "static" }
 
