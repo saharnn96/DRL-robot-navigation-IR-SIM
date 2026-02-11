@@ -6,6 +6,8 @@ from robot_nav.SIM_ENV.sim import SIM
 import yaml
 import matplotlib.pyplot as plt
 
+WORLD_NAME = "robot_world_3"
+MODEL_NAME = "CNNTD3_parallel_world1_base"  # name of the model to load and test, should match the name used during training
 
 def main(args=None):
     """Main testing function"""
@@ -24,10 +26,10 @@ def main(args=None):
         max_action=max_action,
         device=device,
         load_model=True,
-        model_name="CNNTD3_parallel_world3",
+        model_name=MODEL_NAME,
     )  # instantiate a model
 
-    sim = SIM(world_file="worlds/robot_world_3.yaml")  # instantiate environment
+    sim = SIM(world_file="worlds/"+ WORLD_NAME + ".yaml")  # instantiate environment
     with open("robot_nav/eval_points.yaml") as file:
         points = yaml.safe_load(file)
     robot_poses = points["robot"]["poses"]
@@ -136,9 +138,13 @@ def main(args=None):
     axes[1, 1].axhline(y=np.mean(steps_per_ep), color='r', linestyle='--', label=f'Mean: {np.mean(steps_per_ep):.1f}')
     axes[1, 1].legend()
 
-    plt.tight_layout()
-    
-    plt.savefig('robot_nav/models/CNNTD3/checkpoint/test_results.png', dpi=150)
+
+    plt.suptitle(f"Test Results\nModel: {MODEL_NAME} | World: {WORLD_NAME}", fontsize=16, y=1.03)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    # Sanitize file name
+
+    fig_filename = f"robot_nav/models/CNNTD3/checkpoint/test_results_{MODEL_NAME}_{WORLD_NAME}.png"
+    plt.savefig(fig_filename, dpi=150)
     plt.show()
 
     # Add histograms to tensorboard
